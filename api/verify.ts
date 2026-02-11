@@ -1,18 +1,24 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getSubscription } from '../lib/db';
+import { getLicense } from '../lib/db';
 import { PLANS } from '../lib/config';
 
-/**
- * GET /api/verify?email=user@example.com
- * 
- * Проверява абонаментния статус на потребител.
- * Разширението извиква този ендпойнт при стартиране и преди всяка задача.
- * 
- * Response: { plan, taskLimit, status }
- */
+// ============================================================
+// LICENSE KEY VERIFICATION — Помощник
+// ============================================================
+// GET /api/verify
+//   Authorization: Bearer <license-key>
+//   OR X-License-Key: <license-key>
+//
+// Returns: { active: boolean, plan: string, planName: string,
+//            tasksUsed: number, taskLimit: number }
+// ============================================================
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS preflight
   if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-License-Key');
     return res.status(200).end();
   }
 
@@ -20,33 +26,67 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const email = req.query.email as string;
-
-  if (!email) {
-    return res.status(400).json({ error: 'Missing email parameter' });
-  }
-
   try {
-    const subscription = await getSubscription(email);
+    // Extract license key
+    const xKey = req.headers['x-license-key'];
+    const auth = req.headers['authorization'];
+    let licenseKey: string | null = null;
 
-    // Няма запис или изтекъл абонамент → безплатен план
-    if (!subscription || subscription.status === 'expired') {
-      return res.status(200).json({
-        plan: 'free',
-        taskLimit: PLANS.free.taskLimit,
-        status: 'active',
+    if (xKey && typeof xKey === 'string') {
+      licenseKey = xKey;
+    } else if (auth && typeof auth === 'string' && auth.startsWith('Bearer ')) {
+      licenseKey = auth.slice(7).trim();
+    }
+
+    if (!licenseKey) {
+      return res.status(401).json({
+        active: false,
+        error: 'Missing license key',
       });
     }
 
-    const planConfig = PLANS[subscription.plan];
+    // Look up license
+    const license = await getLicense(licenseKey);
 
+    if (!license) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.status(404).json({
+        active: false,
+        error: 'License key not found',
+      });
+    }
+
+    if (license.status !== 'active') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.status(403).json({
+        active: false,
+        plan: license.plan,
+        planName: PLANS[license.plan]?.name || license.plan,
+        status: license.status,
+        error: `License is ${license.status}`,
+      });
+    }
+
+    // Active license — return info
+    const planConfig = PLANS[license.plan] || PLANS.free;
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
     return res.status(200).json({
-      plan: subscription.plan,
-      taskLimit: planConfig?.taskLimit || PLANS.free.taskLimit,
-      status: subscription.status,
+      active: true,
+      plan: license.plan,
+      planName: planConfig.name,
+      email: license.email,
+      tasksUsed: license.tasksUsedThisMonth,
+      taskLimit: planConfig.taskLimit,
+      models: planConfig.models,
+      monthResetDate: license.monthResetDate,
     });
+
   } catch (error: any) {
-    console.error('Verify error:', error.message);
-    return res.status(500).json({ error: 'Failed to verify subscription' });
+    console.error('[Verify] Error:', error.message);
+    return res.status(500).json({
+      active: false,
+      error: 'Internal server error',
+    });
   }
 }

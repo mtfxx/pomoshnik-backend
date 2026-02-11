@@ -1,60 +1,101 @@
 # Помощник Backend
 
-Минимален backend за обработка на плащания чрез Stripe и AI proxy за LLM заявки. Готов за деплой на Vercel.
+Backend за AI proxy и управление на абонаменти чрез Stripe. Готов за деплой на Vercel.
 
 ## Структура
 
 ```
 pomoshnik-backend/
 ├── api/
-│   ├── ai.ts         — AI proxy endpoint (OpenAI, Anthropic, Gemini)
-│   ├── checkout.ts   — Създава Stripe Checkout сесия (Apple Pay автоматично)
-│   ├── debug.ts      — Debug endpoint за диагностика
-│   ├── webhook.ts    — Обработва Stripe webhook събития
-│   └── verify.ts     — Проверява абонаментен статус
+│   ├── ai.ts          — AI proxy (OpenAI, Anthropic, Gemini, DeepSeek)
+│   ├── checkout.ts    — Stripe Checkout сесия
+│   ├── debug.ts       — Диагностичен endpoint
+│   ├── verify.ts      — Валидация на лицензен ключ
+│   └── webhook.ts     — Stripe webhook handler
 ├── lib/
-│   ├── config.ts     — Планове и цени (лесно конфигурируеми)
-│   ├── stripe.ts     — Stripe клиент
-│   └── db.ts         — Database layer (in-memory → Vercel KV при деплой)
-├── .env.example      — Шаблон за environment variables
-├── vercel.json       — Vercel конфигурация
-└── tsconfig.json     — TypeScript конфигурация
+│   ├── config.ts      — Планове, модели, routing логика
+│   ├── db.ts          — License key storage (Vercel KV / in-memory)
+│   └── stripe.ts      — Stripe клиент
+├── .env.example       — Шаблон за environment variables
+├── package.json       — Dependencies
+├── tsconfig.json      — TypeScript конфигурация
+└── vercel.json        — Vercel routing и CORS
 ```
-
-## Деплой на Vercel
-
-1. Създай акаунт в [vercel.com](https://vercel.com) (безплатно)
-2. Качи проекта в GitHub repo
-3. Импортирай repo-то в Vercel
-4. Добави Environment Variables (от `.env.example`)
-5. Deploy!
-
-## Stripe Настройка
-
-1. Създай акаунт в [stripe.com](https://stripe.com)
-2. Създай Products и Prices в Stripe Dashboard
-3. Копирай Price ID-тата в environment variables
-4. Създай Webhook endpoint: `https://your-domain.vercel.app/api/webhook`
-5. Избери events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`
-
-## AI Provider Настройка
-
-Добави следните environment variables в Vercel:
-- `OPENAI_API_KEY` — от [platform.openai.com](https://platform.openai.com)
-- `ANTHROPIC_API_KEY` — от [console.anthropic.com](https://console.anthropic.com)
-- `GEMINI_API_KEY` — от [aistudio.google.com](https://aistudio.google.com)
 
 ## API Endpoints
 
-### POST /api/ai — AI Proxy
-Проксира LLM заявки от разширението. Поддържа streaming.
+### POST /api/ai (или /api/ai/chat/completions)
+AI proxy — приема OpenAI-compatible заявки, определя provider-а от model name.
 
+**Headers:**
+- `Authorization: Bearer <license-key>` или `X-License-Key: <license-key>`
+
+**Body (OpenAI format):**
 ```json
 {
-  "email": "user@example.com",
-  "provider": "openai",
   "model": "gpt-4o",
   "messages": [{"role": "user", "content": "Hello"}],
-  "stream": false
+  "temperature": 0.7,
+  "stream": true
 }
 ```
+
+**Model → Provider routing:**
+- `gpt-*`, `o3-*`, `o1-*` → OpenAI
+- `claude-*` → Anthropic
+- `gemini-*` → Google Gemini
+- `deepseek-*` → DeepSeek
+
+### GET /api/verify
+Валидация на лицензен ключ.
+
+**Headers:** `Authorization: Bearer <license-key>`
+
+**Response:**
+```json
+{
+  "active": true,
+  "plan": "pro",
+  "planName": "Про",
+  "email": "user@example.com",
+  "tasksUsed": 42,
+  "taskLimit": 500,
+  "models": ["gpt-4o", "claude-sonnet-4-20250514", "..."]
+}
+```
+
+### POST /api/checkout
+Създава Stripe Checkout сесия.
+
+**Body:**
+```json
+{ "email": "user@example.com", "plan": "pro" }
+```
+
+### POST /api/webhook
+Stripe webhook — обработва `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`.
+
+### GET /api/debug
+Показва статус на конфигурацията (без секрети).
+
+## Деплой на Vercel
+
+1. Качи проекта в GitHub repo
+2. Импортирай в Vercel
+3. Добави Environment Variables (от `.env.example`)
+4. Deploy
+
+## Планове и лимити
+
+| План | Задачи/месец | Модели |
+|------|-------------|--------|
+| Безплатен | 10 | gpt-4o-mini, gemini-2.0-flash |
+| Стартер | 100 | + gpt-4o, gemini-2.5-flash, claude-sonnet, deepseek |
+| Про | 500 | + o3-mini, gemini-2.5-pro, claude-opus, deepseek-reasoner |
+| Бизнес | Неограничено | Всички модели |
+
+## Лицензни ключове
+
+Формат: `POM-XXXXX-XXXXX-XXXXX-XXXXX`
+
+Ключовете се създават автоматично при успешно Stripe плащане (webhook). За тестване можете да създадете ключ ръчно чрез Vercel KV или in-memory store.

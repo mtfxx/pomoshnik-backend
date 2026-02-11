@@ -1,55 +1,60 @@
 // ============================================================
-// КОНФИГУРАЦИЯ НА ПЛАНОВЕТЕ — Помощник
-// ============================================================
-// Промени цените и лимитите тук. Не е нужно да пипаш друг код.
-// След промяна, трябва да създадеш съответните Products/Prices
-// в Stripe Dashboard и да обновиш priceId-тата по-долу.
+// Помощник — Plans & Configuration
 // ============================================================
 
 export interface PlanConfig {
   name: string;
-  nameEn: string;
-  taskLimit: number;
-  priceId: string; // Stripe Price ID — ще се попълни след създаване в Stripe Dashboard
+  taskLimit: number;       // Max tasks per month (-1 = unlimited)
+  models: string[];        // Allowed model prefixes
+  streaming: boolean;      // Whether streaming is allowed
 }
 
 export const PLANS: Record<string, PlanConfig> = {
   free: {
     name: 'Безплатен',
-    nameEn: 'Free',
-    taskLimit: 20,
-    priceId: '', // Безплатният план няма Price ID
+    taskLimit: 10,
+    models: ['gpt-4o-mini', 'gemini-2.0-flash'],
+    streaming: true,
   },
   starter: {
-    name: 'Starter',
-    nameEn: 'Starter',
+    name: 'Стартер',
     taskLimit: 100,
-    priceId: process.env.STRIPE_PRICE_STARTER || 'price_1SzMIzGslp9oqPrIMrHeX3wT',
+    models: ['gpt-4o-mini', 'gpt-4o', 'gemini-2.0-flash', 'gemini-2.5-flash', 'claude-sonnet-4-20250514', 'deepseek-chat'],
+    streaming: true,
   },
   pro: {
-    name: 'Pro',
-    nameEn: 'Pro',
-    taskLimit: 300,
-    priceId: process.env.STRIPE_PRICE_PRO || 'price_1SzMKNGslp9oqPrIGMvuL3y8',
+    name: 'Про',
+    taskLimit: 500,
+    models: ['gpt-4o-mini', 'gpt-4o', 'o3-mini', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'deepseek-chat', 'deepseek-reasoner'],
+    streaming: true,
   },
   business: {
-    name: 'Business',
-    nameEn: 'Business',
-    taskLimit: 1000,
-    priceId: process.env.STRIPE_PRICE_BUSINESS || 'price_1SzML2Gslp9oqPrIFGhJsgir',
+    name: 'Бизнес',
+    taskLimit: -1,
+    models: ['gpt-4o-mini', 'gpt-4o', 'o3-mini', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'deepseek-chat', 'deepseek-reasoner'],
+    streaming: true,
   },
 };
 
-// Обратно търсене: от Stripe Price ID → план
-export function getPlanByPriceId(priceId: string): PlanConfig | null {
-  for (const plan of Object.values(PLANS)) {
-    if (plan.priceId === priceId) return plan;
+// Determine the real AI provider from the model name
+export function getProviderFromModel(model: string): 'openai' | 'anthropic' | 'gemini' | 'deepseek' | null {
+  if (model.startsWith('gpt-') || model.startsWith('o3-') || model.startsWith('o1-')) {
+    return 'openai';
+  }
+  if (model.startsWith('claude-')) {
+    return 'anthropic';
+  }
+  if (model.startsWith('gemini-')) {
+    return 'gemini';
+  }
+  if (model.startsWith('deepseek-')) {
+    return 'deepseek';
   }
   return null;
 }
 
-// URL-и за пренасочване след плащане
-export const URLS = {
-  success: process.env.SUCCESS_URL || 'https://pomoshnik.bg/success',
-  cancel: process.env.CANCEL_URL || 'https://pomoshnik.bg/cancel',
-};
+// Check if a model is allowed for a given plan
+export function isModelAllowed(plan: string, model: string): boolean {
+  const planConfig = PLANS[plan] || PLANS.free;
+  return planConfig.models.some(allowed => model.startsWith(allowed) || model === allowed);
+}

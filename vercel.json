@@ -1,12 +1,18 @@
 {
   "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/ai/chat/completions",
+      "destination": "/api/ai"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
       "headers": [
         { "key": "Access-Control-Allow-Origin", "value": "*" },
         { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization, X-License-Key, X-Feature" }
       ]
     }
   ]

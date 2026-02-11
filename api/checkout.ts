@@ -1,19 +1,25 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import stripe from '../lib/stripe';
-import { PLANS, URLS } from '../lib/config';
+import { getStripe } from '../lib/stripe';
 
-/**
- * POST /api/checkout
- * 
- * Създава Stripe Checkout сесия и връща URL за плащане.
- * Apple Pay и Google Pay работят автоматично в Stripe Checkout.
- * 
- * Body: { email: string, plan: "starter" | "pro" | "business" }
- * Response: { url: string }
- */
+// ============================================================
+// STRIPE CHECKOUT — Помощник
+// ============================================================
+// POST /api/checkout
+// Body: { email: string, plan: 'starter' | 'pro' | 'business' }
+// ============================================================
+
+const PRICE_MAP: Record<string, string | undefined> = {
+  starter: process.env.STRIPE_PRICE_STARTER,
+  pro: process.env.STRIPE_PRICE_PRO,
+  business: process.env.STRIPE_PRICE_BUSINESS,
+};
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS preflight
+  // CORS
   if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     return res.status(200).end();
   }
 
@@ -24,46 +30,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const { email, plan } = req.body;
 
-    // Валидация
-    if (!email || !plan) {
-      return res.status(400).json({ error: 'Missing email or plan' });
+    if (!email) {
+      return res.status(400).json({ error: 'Missing email' });
+    }
+    if (!plan || !PRICE_MAP[plan]) {
+      return res.status(400).json({ error: 'Invalid plan. Choose: starter, pro, business' });
     }
 
-    const selectedPlan = PLANS[plan];
-    if (!selectedPlan || plan === 'free') {
-      return res.status(400).json({ error: 'Invalid plan. Choose: starter, pro, or business' });
+    const priceId = PRICE_MAP[plan];
+    if (!priceId) {
+      return res.status(503).json({ error: `Price for plan "${plan}" is not configured` });
     }
 
-    // Създаване на Stripe Checkout сесия
+    const stripe = getStripe();
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
-      customer_email: email,
-      line_items: [
-        {
-          price: selectedPlan.priceId,
-          quantity: 1,
-        },
-      ],
-      // Apple Pay + Google Pay работят автоматично тук!
       payment_method_types: ['card'],
-      allow_promotion_codes: true,
-      locale: 'auto',
-      success_url: `${URLS.success}?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: URLS.cancel,
-      metadata: {
-        plan: plan,
-        source: 'pomoshnik-extension',
-      },
+      customer_email: email,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: process.env.SUCCESS_URL || 'https://pomoshnik.bg/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: process.env.CANCEL_URL || 'https://pomoshnik.bg/cancel',
+      metadata: { plan, email },
     });
 
-    return res.status(200).json({ url: session.url });
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return res.status(200).json({ url: session.url, sessionId: session.id });
+
   } catch (error: any) {
-    console.error('Checkout error:', error.message, error.type, error.code);
-    return res.status(500).json({ 
-      error: 'Failed to create checkout session',
-      details: error.message,
-      type: error.type,
-      code: error.code 
-    });
+    console.error('[Checkout] Error:', error.message);
+    return res.status(500).json({ error: 'Failed to create checkout session' });
   }
 }
