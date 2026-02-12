@@ -1,6 +1,10 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getLicense, incrementTaskCount } from '../lib/db';
 import { PLANS, getProviderFromModel, isModelAllowed } from '../lib/config';
+import { checkRateLimit } from '../lib/ratelimit';
+import { createLogger, generateRequestId } from '../lib/logger';
+
+const log = createLogger('ai-proxy');
 
 // ============================================================
 // AI PROXY ENDPOINT — Помощник
@@ -38,11 +42,9 @@ function getApiKey(provider: string): string | null {
 
 // Extract license key from request headers
 function extractLicenseKey(req: VercelRequest): string | null {
-  // Check X-License-Key header first
   const xKey = req.headers['x-license-key'];
   if (xKey && typeof xKey === 'string') return xKey;
 
-  // Check Authorization: Bearer <key>
   const auth = req.headers['authorization'];
   if (auth && typeof auth === 'string' && auth.startsWith('Bearer ')) {
     return auth.slice(7).trim();
@@ -51,7 +53,95 @@ function extractLicenseKey(req: VercelRequest): string | null {
   return null;
 }
 
-// Build request for OpenAI / DeepSeek (same format)
+// ============================================================
+// Provider Error Normalization
+// ============================================================
+// Each provider returns errors in a different format.
+// We normalize them all to a consistent structure.
+
+interface NormalizedError {
+  message: string;
+  type: string;
+  code: string;
+  provider: string;
+  statusCode: number;
+}
+
+function normalizeProviderError(
+  provider: string,
+  statusCode: number,
+  rawBody: any,
+): NormalizedError {
+  const base: NormalizedError = {
+    message: 'AI provider returned an error',
+    type: 'api_error',
+    code: 'provider_error',
+    provider,
+    statusCode,
+  };
+
+  try {
+    switch (provider) {
+      case 'openai':
+      case 'deepseek': {
+        // OpenAI format: { error: { message, type, code } }
+        const err = rawBody?.error;
+        if (err) {
+          base.message = err.message || base.message;
+          base.type = err.type || base.type;
+          base.code = err.code || base.code;
+        }
+        break;
+      }
+
+      case 'anthropic': {
+        // Anthropic format: { error: { type, message } } or { type, error: { type, message } }
+        const err = rawBody?.error;
+        if (err) {
+          base.message = err.message || base.message;
+          base.type = err.type || base.type;
+          base.code = err.type || base.code;
+        } else if (rawBody?.type === 'error') {
+          base.message = rawBody.message || base.message;
+          base.type = rawBody.error?.type || base.type;
+        }
+        break;
+      }
+
+      case 'gemini': {
+        // Gemini format: { error: { code, message, status } } or [{ error: { ... } }]
+        const err = Array.isArray(rawBody) ? rawBody[0]?.error : rawBody?.error;
+        if (err) {
+          base.message = err.message || base.message;
+          base.code = err.status || String(err.code) || base.code;
+          base.type = 'gemini_error';
+        }
+        break;
+      }
+    }
+
+    // Map common HTTP status codes to user-friendly messages
+    if (statusCode === 401 || statusCode === 403) {
+      base.message = `Authentication error with ${provider}. Please contact support.`;
+      base.code = 'provider_auth_error';
+    } else if (statusCode === 429) {
+      base.message = `${provider} rate limit exceeded. Please try again in a moment.`;
+      base.code = 'provider_rate_limit';
+    } else if (statusCode === 500 || statusCode === 502 || statusCode === 503) {
+      base.message = `${provider} is temporarily unavailable. Please try again later.`;
+      base.code = 'provider_unavailable';
+    }
+  } catch {
+    // If normalization fails, return the base error
+  }
+
+  return base;
+}
+
+// ============================================================
+// Request Builders (OpenAI, Anthropic, Gemini)
+// ============================================================
+
 function buildOpenAIRequest(body: any, apiKey: string, provider: string) {
   const payload: any = {
     model: body.model,
@@ -62,8 +152,6 @@ function buildOpenAIRequest(body: any, apiKey: string, provider: string) {
   if (body.stream !== undefined) payload.stream = body.stream;
   if (body.response_format !== undefined) payload.response_format = body.response_format;
   if (body.top_p !== undefined) payload.top_p = body.top_p;
-
-  // Stream options for OpenAI
   if (body.stream && body.stream_options) {
     payload.stream_options = body.stream_options;
   }
@@ -80,7 +168,6 @@ function buildOpenAIRequest(body: any, apiKey: string, provider: string) {
   };
 }
 
-// Build request for Anthropic
 function buildAnthropicRequest(body: any, apiKey: string) {
   const systemMessage = body.messages.find((m: any) => m.role === 'system');
   const nonSystemMessages = body.messages.filter((m: any) => m.role !== 'system');
@@ -106,7 +193,6 @@ function buildAnthropicRequest(body: any, apiKey: string) {
   };
 }
 
-// Build request for Gemini
 function buildGeminiRequest(body: any, apiKey: string) {
   const systemMessage = body.messages.find((m: any) => m.role === 'system');
   const nonSystemMessages = body.messages.filter((m: any) => m.role !== 'system');
@@ -142,6 +228,8 @@ function buildGeminiRequest(body: any, apiKey: string) {
 // ============================================================
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = generateRequestId();
+
   // CORS preflight
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -151,13 +239,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(405).json({ error: { message: 'Method not allowed', type: 'invalid_request_error' } });
   }
 
   try {
     // --- Extract license key ---
     const licenseKey = extractLicenseKey(req);
     if (!licenseKey) {
+      log.warn('Request without license key', { requestId });
       return res.status(401).json({
         error: {
           message: 'Missing license key. Please enter your license key in extension settings.',
@@ -170,6 +259,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // --- Validate license ---
     const license = await getLicense(licenseKey);
     if (!license || license.status !== 'active') {
+      log.warn('Invalid license key used', { requestId, licenseKey });
       return res.status(401).json({
         error: {
           message: 'Invalid or expired license key. Please check your key or renew your subscription.',
@@ -179,8 +269,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
+    // --- Rate limiting ---
+    const plan = license.plan || 'free';
+    const rateResult = await checkRateLimit(licenseKey, plan);
+    if (!rateResult.allowed) {
+      log.warn('Rate limit exceeded', {
+        requestId,
+        licenseKey,
+        plan,
+        limit: rateResult.limit,
+        resetIn: rateResult.resetInSeconds,
+      });
+      res.setHeader('Retry-After', String(rateResult.resetInSeconds));
+      res.setHeader('X-RateLimit-Limit', String(rateResult.limit));
+      res.setHeader('X-RateLimit-Remaining', '0');
+      return res.status(429).json({
+        error: {
+          message: `Rate limit exceeded. Maximum ${rateResult.limit} requests per minute on your ${plan} plan. Retry after ${rateResult.resetInSeconds} seconds.`,
+          type: 'rate_limit_error',
+          code: 'rate_limit_exceeded',
+          retryAfter: rateResult.resetInSeconds,
+        },
+      });
+    }
+
+    // Set rate limit headers on all responses
+    res.setHeader('X-RateLimit-Limit', String(rateResult.limit));
+    res.setHeader('X-RateLimit-Remaining', String(rateResult.remaining));
+
     // --- Parse body ---
-    const { model, messages, temperature, max_tokens, stream, response_format, top_p, stream_options } = req.body;
+    const { model, messages, stream } = req.body;
 
     if (!model) {
       return res.status(400).json({ error: { message: 'Missing model', type: 'invalid_request_error' } });
@@ -190,8 +308,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // --- Check model access ---
-    const plan = license.plan || 'free';
     if (!isModelAllowed(plan, model)) {
+      log.info('Model not allowed for plan', { requestId, licenseKey, plan, model });
       return res.status(403).json({
         error: {
           message: `Model "${model}" is not available on your ${PLANS[plan]?.name || plan} plan. Please upgrade.`,
@@ -201,9 +319,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // --- Check task limit ---
+    // --- Check monthly task limit ---
     const planConfig = PLANS[plan] || PLANS.free;
     if (planConfig.taskLimit !== -1 && license.tasksUsedThisMonth >= planConfig.taskLimit) {
+      log.info('Monthly task limit reached', { requestId, licenseKey, plan, used: license.tasksUsedThisMonth, limit: planConfig.taskLimit });
       return res.status(429).json({
         error: {
           message: `Monthly task limit reached (${planConfig.taskLimit}). Please upgrade your plan.`,
@@ -228,9 +347,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // --- Get API key ---
     const apiKey = getApiKey(provider);
     if (!apiKey) {
+      log.error('Provider API key not configured', { requestId, provider });
       return res.status(503).json({
         error: {
-          message: `Provider ${provider} is not configured. Contact support.`,
+          message: `Provider ${provider} is temporarily unavailable. Contact support.`,
           type: 'server_error',
           code: 'provider_not_configured',
         },
@@ -239,6 +359,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // --- Increment task counter ---
     await incrementTaskCount(licenseKey);
+
+    log.info('Proxying AI request', {
+      requestId,
+      licenseKey,
+      provider,
+      model,
+      streaming: !!stream,
+      messageCount: messages.length,
+    });
 
     // --- Build provider request ---
     let providerRequest: { url: string; headers: Record<string, string>; body: string };
@@ -267,13 +396,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
 
       if (!providerRes.ok) {
-        const errorBody = await providerRes.text();
-        console.error(`[AI Proxy] ${provider} error:`, providerRes.status, errorBody);
+        let errorBody: any;
+        try {
+          errorBody = await providerRes.json();
+        } catch {
+          errorBody = await providerRes.text();
+        }
+
+        const normalized = normalizeProviderError(provider, providerRes.status, errorBody);
+        log.error('Provider stream error', {
+          requestId,
+          licenseKey,
+          provider,
+          model,
+          statusCode: providerRes.status,
+          errorCode: normalized.code,
+          errorMessage: normalized.message,
+        });
+
         return res.status(providerRes.status).json({
           error: {
-            message: `${provider} API error: ${providerRes.status}`,
-            type: 'api_error',
-            details: errorBody,
+            message: normalized.message,
+            type: normalized.type,
+            code: normalized.code,
           },
         });
       }
@@ -282,6 +427,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('X-Request-Id', requestId);
 
       const reader = providerRes.body?.getReader();
       if (!reader) {
@@ -296,8 +442,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const chunk = decoder.decode(value, { stream: true });
           res.write(chunk);
         }
-      } catch (streamError) {
-        console.error('[AI Proxy] Stream error:', streamError);
+      } catch (streamError: any) {
+        log.error('Stream interrupted', { requestId, licenseKey, provider, error: streamError.message });
       } finally {
         res.end();
       }
@@ -314,27 +460,39 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const responseData = await providerRes.json();
 
     if (!providerRes.ok) {
-      console.error(`[AI Proxy] ${provider} error:`, providerRes.status, JSON.stringify(responseData));
+      const normalized = normalizeProviderError(provider, providerRes.status, responseData);
+      log.error('Provider error', {
+        requestId,
+        licenseKey,
+        provider,
+        model,
+        statusCode: providerRes.status,
+        errorCode: normalized.code,
+        errorMessage: normalized.message,
+      });
+
       return res.status(providerRes.status).json({
         error: {
-          message: `${provider} API error`,
-          type: 'api_error',
-          status: providerRes.status,
-          details: responseData,
+          message: normalized.message,
+          type: normalized.type,
+          code: normalized.code,
         },
       });
     }
 
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Request-Id', requestId);
+
+    log.info('Request completed', { requestId, licenseKey, provider, model });
     return res.status(200).json(responseData);
 
   } catch (error: any) {
-    console.error('[AI Proxy] Unexpected error:', error.message);
+    log.error('Unexpected error', { requestId, error: error.message, stack: error.stack?.slice(0, 500) });
     return res.status(500).json({
       error: {
-        message: 'AI proxy internal error',
+        message: 'AI proxy internal error. Please try again.',
         type: 'server_error',
-        details: error.message,
+        code: 'internal_error',
       },
     });
   }

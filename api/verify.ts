@@ -1,6 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getLicense } from '../lib/db';
 import { PLANS } from '../lib/config';
+import { createLogger, generateRequestId } from '../lib/logger';
+
+const log = createLogger('verify');
 
 // ============================================================
 // LICENSE KEY VERIFICATION — Помощник
@@ -14,6 +17,8 @@ import { PLANS } from '../lib/config';
 // ============================================================
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = generateRequestId();
+
   // CORS preflight
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -39,6 +44,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (!licenseKey) {
+      log.warn('Verify request without license key', { requestId });
       return res.status(401).json({
         active: false,
         error: 'Missing license key',
@@ -49,6 +55,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const license = await getLicense(licenseKey);
 
     if (!license) {
+      log.info('License key not found', { requestId, licenseKey });
       res.setHeader('Access-Control-Allow-Origin', '*');
       return res.status(404).json({
         active: false,
@@ -57,6 +64,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (license.status !== 'active') {
+      log.info('Inactive license verified', { requestId, licenseKey, status: license.status });
       res.setHeader('Access-Control-Allow-Origin', '*');
       return res.status(403).json({
         active: false,
@@ -70,6 +78,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Active license — return info
     const planConfig = PLANS[license.plan] || PLANS.free;
 
+    log.info('License verified', { requestId, licenseKey, plan: license.plan });
     res.setHeader('Access-Control-Allow-Origin', '*');
     return res.status(200).json({
       active: true,
@@ -83,7 +92,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
   } catch (error: any) {
-    console.error('[Verify] Error:', error.message);
+    log.error('Verify error', { requestId, error: error.message });
     return res.status(500).json({
       active: false,
       error: 'Internal server error',

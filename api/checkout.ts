@@ -1,5 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getStripe } from '../lib/stripe';
+import { createLogger, generateRequestId } from '../lib/logger';
+
+const log = createLogger('checkout');
 
 // ============================================================
 // STRIPE CHECKOUT — Помощник
@@ -15,6 +18,8 @@ const PRICE_MAP: Record<string, string | undefined> = {
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = generateRequestId();
+
   // CORS
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -39,10 +44,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const priceId = PRICE_MAP[plan];
     if (!priceId) {
+      log.error('Price not configured for plan', { requestId, plan });
       return res.status(503).json({ error: `Price for plan "${plan}" is not configured` });
     }
 
     const stripe = getStripe();
+
+    log.info('Creating checkout session', { requestId, email, plan });
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
@@ -54,11 +62,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       metadata: { plan, email },
     });
 
+    log.info('Checkout session created', { requestId, sessionId: session.id, email, plan });
+
     res.setHeader('Access-Control-Allow-Origin', '*');
     return res.status(200).json({ url: session.url, sessionId: session.id });
 
   } catch (error: any) {
-    console.error('[Checkout] Error:', error.message);
+    log.error('Checkout error', { requestId, error: error.message });
     return res.status(500).json({ error: 'Failed to create checkout session' });
   }
 }

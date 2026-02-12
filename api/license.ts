@@ -1,6 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getStripe } from '../lib/stripe';
 import { getLicenseByEmail } from '../lib/db';
+import { createLogger, generateRequestId } from '../lib/logger';
+
+const log = createLogger('license');
 
 // ============================================================
 // LICENSE KEY RETRIEVAL — Помощник
@@ -12,6 +15,8 @@ import { getLicenseByEmail } from '../lib/db';
 // ============================================================
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = generateRequestId();
+
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -38,13 +43,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try {
       session = await stripe.checkout.sessions.retrieve(sessionId);
     } catch (err: any) {
-      console.error('[License] Stripe session retrieval error:', err.message);
+      log.warn('Invalid Stripe session', { requestId, sessionId, error: err.message });
       return res.status(404).json({ error: 'Invalid or expired session' });
     }
 
     // Get email from session
     const email = session.customer_email || (session.metadata as any)?.email;
     if (!email) {
+      log.warn('No email in checkout session', { requestId, sessionId });
       return res.status(404).json({ error: 'No email found in session' });
     }
 
@@ -53,12 +59,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!license) {
       // License might not be created yet (webhook delay)
+      log.info('License pending for email', { requestId, email });
       return res.status(202).json({
         status: 'pending',
         message: 'Вашият лиценз се обработва. Моля, опреснете страницата след няколко секунди.',
         email,
       });
     }
+
+    log.info('License retrieved successfully', { requestId, email, plan: license.plan });
 
     // Return the license key
     return res.status(200).json({
@@ -70,7 +79,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
   } catch (error: any) {
-    console.error('[License] Error:', error.message);
+    log.error('License retrieval error', { requestId, error: error.message });
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

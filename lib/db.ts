@@ -23,13 +23,18 @@ export interface LicenseRecord {
 // Upstash Redis REST client (no npm package needed)
 // ============================================================
 
-async function redisCommand(...args: (string | number)[]): Promise<any> {
+/**
+ * Execute a Redis command via Upstash REST API.
+ * Exported so other modules (e.g. ratelimit.ts) can reuse it.
+ */
+export async function redisCommand(...args: (string | number)[]): Promise<any> {
   const url = process.env.KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN;
 
   if (!url || !token) {
-    console.error('[DB] KV_REST_API_URL or KV_REST_API_TOKEN not configured');
-    return null;
+    const msg = '[DB] CRITICAL: KV_REST_API_URL or KV_REST_API_TOKEN not configured. Redis is required for production.';
+    console.error(msg);
+    throw new Error(msg);
   }
 
   try {

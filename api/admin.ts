@@ -1,5 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createLicense, getLicense, getLicenseByEmail } from '../lib/db';
+import { createLogger, generateRequestId } from '../lib/logger';
+
+const log = createLogger('admin');
 
 // ============================================================
 // ADMIN ENDPOINT — Помощник
@@ -22,10 +25,16 @@ function isAuthorized(req: VercelRequest): boolean {
 
   // Accept ADMIN_SECRET or STRIPE_SECRET_KEY as admin auth
   const adminSecret = process.env.ADMIN_SECRET || process.env.STRIPE_SECRET_KEY;
+  if (!adminSecret) {
+    log.error('No ADMIN_SECRET or STRIPE_SECRET_KEY configured for admin auth');
+    return false;
+  }
   return token === adminSecret;
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = generateRequestId();
+
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -37,6 +46,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // Auth check
   if (!isAuthorized(req)) {
+    log.warn('Unauthorized admin access attempt', { requestId, ip: req.headers['x-forwarded-for'] });
     return res.status(401).json({ error: 'Unauthorized. Provide admin secret in Authorization header.' });
   }
 
@@ -59,6 +69,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Check if email already has a license
       const existing = await getLicenseByEmail(email);
       if (existing) {
+        log.info('License already exists', { requestId, email, plan: existing.plan });
         return res.status(200).json({
           message: 'License already exists for this email',
           licenseKey: existing.key,
@@ -70,6 +81,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // Create new license
       const licenseKey = await createLicense(email, selectedPlan);
+      log.info('Admin created license', { requestId, email, plan: selectedPlan, licenseKey });
 
       return res.status(201).json({
         message: 'License created successfully',
@@ -90,6 +102,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const license = await getLicense(key);
         if (!license) return res.status(404).json({ error: 'License not found' });
 
+        log.info('Admin lookup by key', { requestId, licenseKey: key });
         return res.status(200).json(license);
       }
 
@@ -100,6 +113,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const license = await getLicenseByEmail(email);
         if (!license) return res.status(404).json({ error: 'No license found for this email' });
 
+        log.info('Admin lookup by email', { requestId, email });
         return res.status(200).json(license);
       }
 
@@ -109,7 +123,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
 
   } catch (error: any) {
-    console.error('[Admin] Error:', error.message);
+    log.error('Admin error', { requestId, error: error.message });
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

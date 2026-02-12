@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vercel dev",
     "build": "",
-    "deploy": "vercel --prod"
+    "deploy": "vercel --prod",
+    "test": "npx tsx tests/integration.test.ts",
+    "test:live": "BACKEND_URL=https://pomoshnik-backend.vercel.app npx tsx tests/integration.test.ts"
   },
   "dependencies": {
     "stripe": "^14.0.0"
