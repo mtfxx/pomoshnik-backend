@@ -70,7 +70,20 @@ export async function getLicense(licenseKey: string): Promise<LicenseRecord | nu
   if (!data) return null;
 
   try {
-    return typeof data === 'string' ? JSON.parse(data) : data;
+    const record: LicenseRecord = typeof data === 'string' ? JSON.parse(data) : data;
+
+    // Lazy monthly reset: if the reset date has passed, zero the counter
+    const now = new Date();
+    const resetDate = new Date(record.monthResetDate);
+    if (now >= resetDate) {
+      record.tasksUsedThisMonth = 0;
+      record.monthResetDate = getNextMonthReset();
+      record.updatedAt = now.toISOString();
+      // Persist the reset (fire-and-forget, don't block the read)
+      setLicense(licenseKey, record).catch(() => {});
+    }
+
+    return record;
   } catch {
     return null;
   }

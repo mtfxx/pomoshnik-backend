@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getStripe } from '../lib/stripe';
 import { createLicense, saveSubscription, getLicenseByEmail } from '../lib/db';
 import { createLogger } from '../lib/logger';
+import { sendLicenseKeyEmail } from '../lib/email';
 
 const log = createLogger('webhook');
 
@@ -91,7 +92,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               subscriptionId,
             });
             log.info('Created new license', { email, plan, licenseKey });
-            // TODO: Send email with license key to user via Resend
+
+            // Send license key email (fire-and-forget, don't block webhook response)
+            sendLicenseKeyEmail(email, licenseKey, plan).catch(err => {
+              log.error('Failed to send license email', { email, error: err.message });
+            });
           }
         } else {
           log.warn('Checkout completed without email', { sessionId: session.id });
