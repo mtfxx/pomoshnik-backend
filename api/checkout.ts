@@ -52,15 +52,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     log.info('Creating checkout session', { requestId, email, plan });
 
+    const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '30', 10);
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       payment_method_types: ['card'],
       customer_email: email,
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: process.env.SUCCESS_URL || 'https://pomoshnik.bg/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: process.env.CANCEL_URL || 'https://pomoshnik.bg/cancel',
+      subscription_data: {
+        trial_period_days: TRIAL_DAYS,
+        metadata: { plan, email },
+      },
+      success_url: process.env.SUCCESS_URL || 'https://pomoshnik.tech/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: process.env.CANCEL_URL || 'https://pomoshnik.tech/#pricing',
       metadata: { plan, email },
     });
+
+    log.info('Trial period configured', { requestId, trialDays: TRIAL_DAYS });
 
     log.info('Checkout session created', { requestId, sessionId: session.id, email, plan });
 
